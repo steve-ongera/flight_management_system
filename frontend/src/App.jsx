@@ -1,121 +1,105 @@
-import { useState } from 'react'
-import reactLogo from './assets/react.svg'
-import viteLogo from './assets/vite.svg'
-import heroImg from './assets/hero.png'
-import './App.css'
+/**
+ * App.jsx — Root router with role-based protected routes
+ */
+import { BrowserRouter, Routes, Route, Navigate } from 'react-router-dom';
+import { useAuth } from './context/AuthContext.jsx';
 
-function App() {
-  const [count, setCount] = useState(0)
+// Layout
+import AppLayout from './components/layout/AppLayout.jsx';
 
-  return (
-    <>
-      <section id="center">
-        <div className="hero">
-          <img src={heroImg} className="base" width="170" height="179" alt="" />
-          <img src={reactLogo} className="framework" alt="React logo" />
-          <img src={viteLogo} className="vite" alt="Vite logo" />
-        </div>
-        <div>
-          <h1>Get started</h1>
-          <p>
-            Edit <code>src/App.jsx</code> and save to test <code>HMR</code>
-          </p>
-        </div>
-        <button
-          className="counter"
-          onClick={() => setCount((count) => count + 1)}
-        >
-          Count is {count}
-        </button>
-      </section>
+// Pages
+import LoginPage       from './pages/LoginPage.jsx';
+import DashboardPage   from './pages/DashboardPage.jsx';
+import BookingsPage    from './pages/BookingsPage.jsx';
+import BookingDetail   from './pages/BookingDetail.jsx';
+import FleetPage       from './pages/FleetPage.jsx';
+import AircraftDetail  from './pages/AircraftDetail.jsx';
+import CrewPage        from './pages/CrewPage.jsx';
+import MaintenancePage from './pages/MaintenancePage.jsx';
+import AirportsPage    from './pages/AirportsPage.jsx';
+import ReportsPage     from './pages/ReportsPage.jsx';
+import UsersPage       from './pages/UsersPage.jsx';
+import SettingsPage    from './pages/SettingsPage.jsx';
+import ClientPortal    from './pages/ClientPortal.jsx';
+import PilotPortal     from './pages/PilotPortal.jsx';
+import NotFound        from './pages/NotFound.jsx';
 
-      <div className="ticks"></div>
-
-      <section id="next-steps">
-        <div id="docs">
-          <svg className="icon" role="presentation" aria-hidden="true">
-            <use href="/icons.svg#documentation-icon"></use>
-          </svg>
-          <h2>Documentation</h2>
-          <p>Your questions, answered</p>
-          <ul>
-            <li>
-              <a href="https://vite.dev/" target="_blank">
-                <img className="logo" src={viteLogo} alt="" />
-                Explore Vite
-              </a>
-            </li>
-            <li>
-              <a href="https://react.dev/" target="_blank">
-                <img className="button-icon" src={reactLogo} alt="" />
-                Learn more
-              </a>
-            </li>
-          </ul>
-        </div>
-        <div id="social">
-          <svg className="icon" role="presentation" aria-hidden="true">
-            <use href="/icons.svg#social-icon"></use>
-          </svg>
-          <h2>Connect with us</h2>
-          <p>Join the Vite community</p>
-          <ul>
-            <li>
-              <a href="https://github.com/vitejs/vite" target="_blank">
-                <svg
-                  className="button-icon"
-                  role="presentation"
-                  aria-hidden="true"
-                >
-                  <use href="/icons.svg#github-icon"></use>
-                </svg>
-                GitHub
-              </a>
-            </li>
-            <li>
-              <a href="https://chat.vite.dev/" target="_blank">
-                <svg
-                  className="button-icon"
-                  role="presentation"
-                  aria-hidden="true"
-                >
-                  <use href="/icons.svg#discord-icon"></use>
-                </svg>
-                Discord
-              </a>
-            </li>
-            <li>
-              <a href="https://x.com/vite_js" target="_blank">
-                <svg
-                  className="button-icon"
-                  role="presentation"
-                  aria-hidden="true"
-                >
-                  <use href="/icons.svg#x-icon"></use>
-                </svg>
-                X.com
-              </a>
-            </li>
-            <li>
-              <a href="https://bsky.app/profile/vite.dev" target="_blank">
-                <svg
-                  className="button-icon"
-                  role="presentation"
-                  aria-hidden="true"
-                >
-                  <use href="/icons.svg#bluesky-icon"></use>
-                </svg>
-                Bluesky
-              </a>
-            </li>
-          </ul>
-        </div>
-      </section>
-
-      <div className="ticks"></div>
-      <section id="spacer"></section>
-    </>
-  )
+function ProtectedRoute({ children, allowedRoles }) {
+  const { user, loading } = useAuth();
+  if (loading) return (
+    <div className="loading-overlay">
+      <div className="spinner" />
+    </div>
+  );
+  if (!user) return <Navigate to="/login" replace />;
+  if (allowedRoles && !allowedRoles.includes(user.role)) {
+    return <Navigate to="/" replace />;
+  }
+  return children;
 }
 
-export default App
+function RoleHome() {
+  const { user } = useAuth();
+  if (user?.role === 'client') return <Navigate to="/client" replace />;
+  if (user?.role === 'pilot')  return <Navigate to="/pilot"  replace />;
+  return <Navigate to="/dashboard" replace />;
+}
+
+export default function App() {
+  const { user } = useAuth();
+
+  return (
+    <BrowserRouter>
+      <Routes>
+        {/* Public */}
+        <Route path="/login" element={
+          user ? <Navigate to="/" replace /> : <LoginPage />
+        } />
+
+        {/* Role redirect */}
+        <Route path="/" element={
+          <ProtectedRoute><RoleHome /></ProtectedRoute>
+        } />
+
+        {/* Admin / Ops routes */}
+        <Route element={
+          <ProtectedRoute allowedRoles={['admin', 'ops']}>
+            <AppLayout />
+          </ProtectedRoute>
+        }>
+          <Route path="/dashboard"   element={<DashboardPage />} />
+          <Route path="/bookings"    element={<BookingsPage />} />
+          <Route path="/bookings/:id" element={<BookingDetail />} />
+          <Route path="/fleet"       element={<FleetPage />} />
+          <Route path="/fleet/:id"   element={<AircraftDetail />} />
+          <Route path="/crew"        element={<CrewPage />} />
+          <Route path="/maintenance" element={<MaintenancePage />} />
+          <Route path="/airports"    element={<AirportsPage />} />
+          <Route path="/reports"     element={<ReportsPage />} />
+          <Route path="/settings"    element={<SettingsPage />} />
+          <Route path="/users" element={
+            <ProtectedRoute allowedRoles={['admin']}>
+              <UsersPage />
+            </ProtectedRoute>
+          } />
+        </Route>
+
+        {/* Client portal */}
+        <Route path="/client" element={
+          <ProtectedRoute allowedRoles={['client']}>
+            <ClientPortal />
+          </ProtectedRoute>
+        } />
+
+        {/* Pilot portal */}
+        <Route path="/pilot" element={
+          <ProtectedRoute allowedRoles={['pilot']}>
+            <PilotPortal />
+          </ProtectedRoute>
+        } />
+
+        <Route path="*" element={<NotFound />} />
+      </Routes>
+    </BrowserRouter>
+  );
+}
