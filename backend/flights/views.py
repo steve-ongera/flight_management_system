@@ -748,6 +748,140 @@ class UserAdminViewSet(viewsets.ModelViewSet):
 class DashboardViewSet(viewsets.ViewSet):
     permission_classes = [permissions.IsAuthenticated]
 
+    def list(self, request):
+        """
+        Unified dashboard endpoint — returns everything the frontend needs
+        in one shot: stats, revenue_chart, status_distribution,
+        recent_bookings, maintenance_alerts.
+        """
+        role = request.user.role
+        if role not in ('admin', 'ops'):
+            # Delegate non-admin roles to their own endpoints
+            if role == 'pilot':
+                return self.pilot(request)
+            if role == 'client':
+                return self.client(request)
+            return Response({'error': 'No dashboard for this role.'}, status=403)
+
+        months = int(request.query_params.get('months', 12))
+        now         = timezone.now()
+        month_start = now.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
+        since       = now - timedelta(days=months * 31)
+
+        # ── KPI Stats ────────────────────────────────────────────────
+        flights    = Flight.objects.all()
+        revenue_qs = flights.filter(
+            status__in=['completed', 'in_flight'],
+            quoted_price_usd__isnull=False,
+        )
+
+        stats = {
+            'total_bookings':    flights.count(),
+            'pending_inquiries': CharterRequest.objects.filter(status='pending').count(),
+            'in_flight':         flights.filter(status='in_flight').count(),
+            'completed':         flights.filter(status='completed').count(),
+            'total_revenue':     float(revenue_qs.aggregate(t=Sum('quoted_price_usd'))['t'] or 0),
+            'monthly_revenue':   float(
+                revenue_qs.filter(departure_dt__gte=month_start)
+                .aggregate(t=Sum('quoted_price_usd'))['t'] or 0
+            ),
+            'total_commission':  float(revenue_qs.aggregate(t=Sum('commission_usd'))['t'] or 0),
+            'total_aircraft':    Aircraft.objects.count(),
+            'available_aircraft': Aircraft.objects.filter(status='available').count(),
+            'total_crew':        CrewMember.objects.count(),
+            'crew_available':    CrewMember.objects.filter(status='available').count(),
+            'unpaid_invoices':   Invoice.objects.filter(status__in=['sent', 'overdue']).count(),
+        }
+
+        # ── Revenue Chart ────────────────────────────────────────────
+        revenue_rows = (
+            Flight.objects
+            .filter(
+                status__in=['completed', 'in_flight'],
+                quoted_price_usd__isnull=False,
+                departure_dt__gte=since,
+            )
+            .annotate(month=TruncMonth('departure_dt'))
+            .values('month')
+            .annotate(
+                count=Count('id'),
+                gross=Sum('quoted_price_usd'),
+                commission=Sum('commission_usd'),
+                net=Sum('net_revenue_usd'),
+            )
+            .order_by('month')
+        )
+        revenue_chart = [
+            {
+                'month':      row['month'].strftime('%Y-%m'),
+                'label':      row['month'].strftime('%b %Y'),
+                'count':      row['count'],
+                'gross':      float(row['gross'] or 0),       # matches <Area dataKey="gross">
+                'commission': float(row['commission'] or 0),
+                'net':        float(row['net'] or 0),
+            }
+            for row in revenue_rows
+        ]
+
+        # ── Status Distribution (pie chart) ──────────────────────────
+        status_counts = (
+            Flight.objects
+            .values('status')
+            .annotate(count=Count('id'))
+        )
+        status_distribution = {row['status']: row['count'] for row in status_counts}
+
+        # ── Recent Bookings ──────────────────────────────────────────
+        recent_flights = (
+            Flight.objects
+            .select_related('origin', 'destination', 'client')
+            .order_by('-created_at')[:8]
+        )
+        recent_bookings = [
+            {
+                'id':               f.id,
+                'reference':        str(f.reference),
+                'guest_name':       f.client.get_full_name() if f.client else '—',
+                'guest_email':      f.client.email if f.client else '—',
+                'origin_detail':    {'code': f.origin.code,      'city': f.origin.city},
+                'destination_detail': {'code': f.destination.code, 'city': f.destination.city},
+                'departure_date':   f.departure_dt.date().isoformat(),
+                'status':           f.status,
+                'quoted_price_usd': float(f.quoted_price_usd) if f.quoted_price_usd else None,
+            }
+            for f in recent_flights
+        ]
+
+        # ── Maintenance Alerts ───────────────────────────────────────
+        next_30    = now.date() + timedelta(days=30)
+        maint_logs = (
+            MaintenanceLog.objects
+            .filter(status='scheduled', scheduled_date__lte=next_30)
+            .select_related('aircraft')
+            .order_by('scheduled_date')[:5]
+        )
+        maintenance_alerts = [
+            {
+                'id':            m.id,
+                'aircraft_name': m.aircraft.name,
+                'type_display':  m.get_maintenance_type_display(),
+                'scheduled_date': m.scheduled_date.isoformat(),
+                'status':        m.status,
+                'technician':    m.technician,
+            }
+            for m in maint_logs
+        ]
+
+        return Response({
+            'stats':                stats,
+            'revenue_chart':        revenue_chart,
+            'status_distribution':  status_distribution,
+            'recent_bookings':      recent_bookings,
+            'maintenance_alerts':   maintenance_alerts,
+        })
+
+    # ── Standalone actions (still available at /dashboard/admin/ etc.) ──
+
     @action(detail=False, methods=['get'])
     def admin(self, request):
         if request.user.role not in ['admin', 'ops']:
@@ -755,7 +889,6 @@ class DashboardViewSet(viewsets.ViewSet):
 
         now = timezone.now()
         month_start = now.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
-
         flights    = Flight.objects.all()
         revenue_qs = flights.filter(
             status__in=['completed', 'in_flight'],
@@ -763,23 +896,23 @@ class DashboardViewSet(viewsets.ViewSet):
         )
 
         return Response({
-            'total_flights':      flights.count(),
-            'scheduled_flights':  flights.filter(status__in=['scheduled', 'boarding', 'delayed']).count(),
-            'completed_flights':  flights.filter(status='completed').count(),
-            'today_flights':      flights.filter(departure_dt__date=now.date()).count(),
-            'total_revenue_usd':  float(revenue_qs.aggregate(t=Sum('quoted_price_usd'))['t'] or 0),
-            'monthly_revenue_usd': float(
+            'total_flights':        flights.count(),
+            'scheduled_flights':    flights.filter(status__in=['scheduled', 'boarding', 'delayed']).count(),
+            'completed_flights':    flights.filter(status='completed').count(),
+            'today_flights':        flights.filter(departure_dt__date=now.date()).count(),
+            'total_revenue_usd':    float(revenue_qs.aggregate(t=Sum('quoted_price_usd'))['t'] or 0),
+            'monthly_revenue_usd':  float(
                 revenue_qs.filter(departure_dt__gte=month_start)
                 .aggregate(t=Sum('quoted_price_usd'))['t'] or 0
             ),
             'total_commission_usd': float(revenue_qs.aggregate(t=Sum('commission_usd'))['t'] or 0),
-            'total_aircraft':     Aircraft.objects.count(),
-            'available_aircraft': Aircraft.objects.filter(status='available').count(),
-            'maintenance_alerts': len([a for a in Aircraft.objects.all() if a.hours_until_maintenance <= 10]),
-            'pending_requests':   CharterRequest.objects.filter(status='pending').count(),
-            'total_crew':         CrewMember.objects.count(),
-            'available_crew':     CrewMember.objects.filter(status='available').count(),
-            'unpaid_invoices':    Invoice.objects.filter(status__in=['sent', 'overdue']).count(),
+            'total_aircraft':       Aircraft.objects.count(),
+            'available_aircraft':   Aircraft.objects.filter(status='available').count(),
+            'maintenance_alerts':   len([a for a in Aircraft.objects.all() if a.hours_until_maintenance <= 10]),
+            'pending_requests':     CharterRequest.objects.filter(status='pending').count(),
+            'total_crew':           CrewMember.objects.count(),
+            'available_crew':       CrewMember.objects.filter(status='available').count(),
+            'unpaid_invoices':      Invoice.objects.filter(status__in=['sent', 'overdue']).count(),
         })
 
     @action(detail=False, methods=['get'])
@@ -837,12 +970,12 @@ class DashboardViewSet(viewsets.ViewSet):
         ).order_by('departure_dt')[:10]
 
         return Response({
-            'upcoming_flights': FlightSerializer(upcoming, many=True).data,
+            'upcoming_flights':  FlightSerializer(upcoming, many=True).data,
             'completed_flights': Flight.objects.filter(
                 Q(captain=crew) | Q(first_officer=crew), status='completed'
             ).count(),
             'total_hours': float(crew.total_hours),
-            'status': crew.status,
+            'status':      crew.status,
         })
 
     @action(detail=False, methods=['get'])
